@@ -13,7 +13,7 @@ Anomaly Detection  - это задача детекции аномалий на 
 
 ## Архитектура репозитория  
 
-Anomaly_detection 
+Anomaly_detection  
 |  
 |___training_code (директория с обучением моделей и подбором параметров)  
 |  
