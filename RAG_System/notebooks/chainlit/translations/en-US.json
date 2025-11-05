@@ -1,0 +1,219 @@
+{
+    "common": {
+        "actions": {
+            "cancel": "Отменить",
+            "confirm": "Подтвердить",
+            "continue": "Продолжить",
+            "goBack": "Шаг назад",
+            "reset": "Сбросить",
+            "submit": "Submit"
+        },
+        "status": {
+            "loading": "Загрузка...",
+            "error": {
+                "default": "Возникла ошибка",
+                "serverConnection": "Невозможно подключиться к серверу"
+            }
+        }
+    },
+    "auth": {
+        "login": {
+            "title": "Укажите логин и пароль для доступа к ассистенту",
+            "form": {
+                "email": {
+                    "label": "Логин",
+                    "required": "Необходим логин"
+                },
+                "password": {
+                    "label": "Пароль",
+                    "required": "Необходим пароль"
+                },
+                "actions": {
+                    "signin": "Войти"
+                },
+                "alternativeText": {
+                    "or": "ИЛИ"
+                }
+            },
+            "errors": {
+                "default": "Невозможно войти",
+                "signin": "Try signing in with a different account",
+                "oauthSignin": "Try signing in with a different account",
+                "redirectUriMismatch": "The redirect URI is not matching the oauth app configuration",
+                "oauthCallback": "Try signing in with a different account",
+                "oauthCreateAccount": "Try signing in with a different account",
+                "emailCreateAccount": "Try signing in with a different account",
+                "callback": "Try signing in with a different account",
+                "oauthAccountNotLinked": "To confirm your identity, sign in with the same account you used originally",
+                "emailSignin": "The e-mail could not be sent",
+                "emailVerify": "Please verify your email, a new email has been sent",
+                "credentialsSignin": "Sign in failed. Check the details you provided are correct",
+                "sessionRequired": "Please sign in to access this page"
+            }
+        },
+        "provider": {
+            "continue": "Continue with {{provider}}"
+        }
+    },
+    "chat": {
+        "input": {
+            "placeholder": "Что хотите спросить сегодня?",
+            "actions": {
+                "send": "Отправить сообщение",
+                "stop": "Остановить выполнение",
+                "attachFiles": "Прикрепить файлы (не работает)"
+            }
+        },
+        "commands": {
+            "button": "Tools",
+            "changeTool": "Change Tool",
+            "availableTools": "Available Tools"
+        },
+        "speech": {
+            "start": "Start recording",
+            "stop": "Stop recording",
+            "connecting": "Connecting"
+        },
+        "fileUpload": {
+            "dragDrop": "Drag and drop files here",
+            "browse": "Browse Files",
+            "sizeLimit": "Limit:",
+            "errors": {
+                "failed": "Failed to upload",
+                "cancelled": "Cancelled upload of"
+            }
+        },
+        "messages": {
+            "status": {
+                "using": "",
+                "used": ""
+            },
+            "actions": {
+                "copy": {
+                    "button": "Копировать",
+                    "success": "Скопированно!"
+                }
+            },
+            "feedback": {
+                "positive": "Полезно",
+                "negative": "Не полезно",
+                "edit": "Edit feedback",
+                "dialog": {
+                    "title": "Оставить комментарий (не работает)",
+                    "submit": "Отправить"
+                },
+                "status": {
+                    "updating": "Updating",
+                    "updated": "Feedback updated"
+                }
+            }
+        },
+        "history": {
+            "title": "Last Inputs",
+            "empty": "Such empty...",
+            "show": "Show history"
+        },
+        "settings": {
+            "title": "Settings panel"
+        },
+        "watermark": "Ассистент может ошибаться. Перепроверяйте информацию."
+    },
+    "threadHistory": {
+        "sidebar": {
+            "title": "Прошлые чаты",
+            "filters": {
+                "search": "Поиск",
+                "placeholder": "Поиск чатов..."
+            },
+            "timeframes": {
+                "today": "Сегодня",
+                "yesterday": "Вчера",
+                "previous7days": "Предыдущие 7 дней",
+                "previous30days": "Предыдущие 30 дней"
+            },
+            "empty": "Чаты не найдены",
+            "actions": {
+                "close": "Закрыть вкладку",
+                "open": "Открыть вкладку"
+            }
+        },
+        "thread": {
+            "untitled": "Безымянный чат",
+            "menu": {
+                "rename": "Переименовать",
+                "delete": "Удалить"
+            },
+            "actions": {
+                "delete": {
+                    "title": "Подтвердить удаление",
+                    "description": "Это удалит весь чат со всем его наполнением, включая сообщения и файлы. Это действие нельзя будет отменить",
+                    "success": "Чат удален",
+                    "inProgress": "Удаление чата"
+                },
+                "rename": {
+                    "title": "Переименовать чат",
+                    "description": "Введите новый заголовок чата",
+                    "form": {
+                        "name": {
+                            "label": "Заголовок",
+                            "placeholder": "Введите заголовок"
+                        }
+                    },
+                    "success": "Чат переименован!",
+                    "inProgress": "Процесс переименования чата"
+                }
+            }
+        }
+    },
+    "navigation": {
+        "header": {
+            "chat": "Чат",
+            "readme": "Инструкция",
+            "theme": {
+                "light": "Светлая тема",
+                "dark": "Тёмная тема",
+                "system": "Follow System"
+            }
+        },
+        "newChat": {
+            "button": "Новый чат",
+            "dialog": {
+                "title": "Создать новый чат",
+                "description": "Это очистит текущую историю чата. Вы хотите продолжить?",
+                "tooltip": "Новый чат"
+            }
+        },
+        "user": {
+            "menu": {
+                "settings": "Settings",
+                "settingsKey": "S",
+                "apiKeys": "API Keys",
+                "logout": "Logout"
+            }
+        }
+    },
+    "apiKeys": {
+        "title": "Required API Keys",
+        "description": "To use this app, the following API keys are required. The keys are stored on your device's local storage.",
+        "success": {
+            "saved": "Saved successfully"
+        }
+    },
+    "alerts": {
+        "info": "Info",
+        "note": "Note",
+        "tip": "Tip",
+        "important": "Important",
+        "warning": "Warning",
+        "caution": "Caution",
+        "debug": "Debug",
+        "example": "Example",
+        "success": "Success",
+        "help": "Help",
+        "idea": "Idea",
+        "pending": "Pending",
+        "security": "Security",
+        "beta": "Beta",
+        "best-practice": "Best Practice"
+    }
+}
