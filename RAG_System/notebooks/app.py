@@ -1,33 +1,34 @@
-# Настройте конфиг (укажите пути к моделям и подключение к БД)
-# Запустите скрипт через консоль chainlit run app.py -w
-
 import os
 import json
 import psycopg2
 import torch
 import torch.nn.functional as F
 import chainlit as cl
-from datetime import datetime
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
-from collections import defaultdict
-from scipy.spatial import distance
-from langchain_core.runnables.history import RunnableWithMessageHistory, BaseChatMessageHistory
-from langchain_core.chat_history import InMemoryChatMessageHistory
+from chainlit.element import File
+from datetime import datetime
+from typing import Dict, Optional, List
+from chainlit import PersistedUser, User
 from chainlit.data import BaseDataLayer
-from chainlit.element import ElementDict, File
+from chainlit.element import ElementDict
 from chainlit.step import StepDict
-from chainlit import User, PersistedUser
-from chainlit.types import ThreadDict, Pagination, ThreadFilter, PaginatedResponse, PageInfo
-from typing import Optional, Dict, List
+from chainlit.types import Feedback, ThreadDict, Pagination, ThreadFilter, PaginatedResponse, PageInfo
+from uuid import uuid4
+from starlette.staticfiles import StaticFiles
+import asyncio
+from chainlit.server import app
+from starlette.routing import Mount
+import time
 
 # ------------------------
 # Config
 # ------------------------
-DB_CONN = "dbname=appdb user=appuser password=secret port=5432 host=rag-data" # Подключение к вашей БД
-EMB_MODEL_PATH = "/wrk/models/embedding_models/models--intfloat--multilingual-e5-large-instruct/snapshots/274baa43b0e13e37fafa6428dbc7938e62e5c439" # Путь до вашей эмбеддинговой модели
-LLM_MODEL_PATH = "/wrk/models/llms/models--mistralai--Mistral-7B-Instruct-v0.3/snapshots/0d4b76e1efeb5eb6f6b5e757c79870472e04bd3a" # Путь до вашей языковой модели
-TOP_K = 7 # Сколько релевантных чанков для вашего запроса будет извлекать эмбеддинговая модель
-
+DB_CONN = "dbname=appdb user=appuser password=secret port=5432 host=10.101.10.106"
+EMB_MODEL_PATH = "/wrk/models/models--intfloat--multilingual-e5-large-instruct/snapshots/274baa43b0e13e37fafa6428dbc7938e62e5c439"
+LLM_MODEL_PATH = "/wrk/models/models--mistralai--Mistral-7B-Instruct-v0.3/snapshots/0d4b76e1efeb5eb6f6b5e757c79870472e04bd3a"
+DOCS = "/wrk/data"
+TOP_K = 9
+inference_semaphore = asyncio.Semaphore(1)
 # ------------------------
 # Models
 # ------------------------
@@ -44,15 +45,18 @@ llm_model = AutoModelForCausalLM.from_pretrained(
     LLM_MODEL_PATH,
     device_map=device,
     trust_remote_code=True,
-    # torch_dtype=torch.bfloat16,
     quantization_config=quantization_config,
 ).eval()
+llm_model = torch.compile(llm_model)
 
 # ------------------------
 # DB
 # ------------------------
-conn = psycopg2.connect(DB_CONN)
-cur = conn.cursor()
+
+def get_db_connection():
+    return psycopg2.connect(DB_CONN)
+
+app.router.routes.insert(0, Mount("/docs", app=StaticFiles(directory=DOCS), name="docs"))
 
 # ------------------------
 # Embedding helpers
@@ -66,7 +70,7 @@ def average_pool(last_hidden_states, attention_mask):
     return sum_embeddings / sum_mask
 
 def embed(text: str):
-    inputs = emb_tokenizer(text, return_tensors="pt", truncation=True, max_length=MAX_LENGTH).to(device)
+    inputs = emb_tokenizer("query: "+text, return_tensors="pt", truncation=True, max_length=MAX_LENGTH).to(device)
     with torch.no_grad():
         outputs = emb_model(**inputs)
         emb = average_pool(outputs.last_hidden_state, inputs['attention_mask'])
@@ -76,50 +80,91 @@ def embed(text: str):
 # ------------------------
 # DB search
 # ------------------------
+
 def search_context(query, top_k=TOP_K):
-    query_emb = embed(query).tolist()
-    cur.execute(
-        """
-        SELECT doc_id, content, metadata FROM documents_e5
-        ORDER BY embedding <-> %s
-        LIMIT %s
-        """,
-        (json.dumps(query_emb), top_k)
-    )
-    results = cur.fetchall()
-    return results  # [(doc_id, chunk, metadata), ...]
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+    # Embeddings
+        query_emb = embed(query).tolist()
+        cur.execute(
+            """
+            SELECT doc_id, content, metadata, 1 - (embedding <-> %s) AS vec_score
+            FROM documents
+            ORDER BY embedding <-> %s
+            LIMIT %s
+            """,
+            (json.dumps(query_emb), json.dumps(query_emb), top_k*2)
+        )
+        vec_results = cur.fetchall()
+
+        # BM25
+        cur.execute(
+            """
+            SELECT doc_id, content, metadata, ts_rank_cd(tsv, plainto_tsquery('russian', %s)) AS bm25_score
+            FROM documents
+            WHERE tsv @@ plainto_tsquery('russian', %s)
+            ORDER BY bm25_score DESC
+            LIMIT %s
+            """,
+            (query, query, top_k*2)
+        )
+        bm25_results = cur.fetchall()
+
+        # Ranking and concat
+        k = 60
+        rrf_scores = {}
+
+        for rank, (doc_id, content, metadata, _) in enumerate(vec_results):
+            key = content
+            rrf_scores.setdefault(key, {'doc_id': doc_id, 'metadata': metadata, 'score':0})
+            rrf_scores[key]['score'] += 1.0 / (k + rank + 1)
+
+        for rank, (doc_id, content, metadata, _) in enumerate(bm25_results):
+            key = content
+            if key not in rrf_scores:
+                rrf_scores[key] = {'doc_id': doc_id, 'metadata': metadata, 'score':0}
+            rrf_scores[key]['score'] += 1.0 / (k + rank + 1)
+
+        sorted_items = sorted(rrf_scores.items(), key=lambda x: x[1]['score'], reverse=True)
+
+        return [(item['doc_id'], content, item['metadata']) for content, item in sorted_items][:top_k]
+    
+    finally:
+        cur.close()
+        conn.close()
 
 # ------------------------
 # LLM helpers
 # ------------------------
 def ask_llm(question, context, chat_history):
-    prompt = f'''
-Ты - ассистент для поиска в документах. Отвечай ТОЛЬКО на основе предоставленного контекста.
+    system_prompt = """Ты - ассистент для поиска в документах. Отвечай ТОЛЬКО на основе предоставленного контекста.
 
-КОНТЕКСТ ДОКУМЕНТОВ:
+ИНСТРУКЦИИ:
+1. Отвечай ТОЛЬКО на основе контекста ниже
+2. Если информации нет в контексте - скажи "В предоставленных документах нет информации по этому вопросу"
+3. Будь точным
+4. Не придумывай информацию
+5. Если нужно, уточни какой документ используешь    
+"""
+
+    prompt = f"""КОНТЕКСТ ДОКУМЕНТОВ:
 {context}
 
 ИСТОРИЯ ДИАЛОГА:
 {chat_history}
 
-ИНСТРУКЦИИ:
-1. Отвечай ТОЛЬКО на основе контекста выше
-2. Если информации нет в контексте - скажи "В предоставленных документах нет информации по этому вопросу"
-3. Будь точным и лаконичным
-4. Не придумывай информацию
-5. Если нужно, уточни какой документ используешь
+ВОПРОС: 
+{question}
 
-ВОПРОС: {question}
+ОТВЕТ:"""
 
-ОТВЕТ:'''
-
-    messages = [{"role":"user", "content":prompt}]
+    messages = [{"role":"system", "content":system_prompt},{"role":"user", "content":prompt}]
     
     input_ids = llm_tokenizer.apply_chat_template(
         messages,
-        add_generaton_prompt=True,
+        add_generation_prompt=True,
         return_tensors="pt",
-        tokenize=True,
         return_dict=True
     ).to(device)
     
@@ -128,10 +173,10 @@ def ask_llm(question, context, chat_history):
         llm_tokenizer.convert_tokens_to_ids("<|eot_id|>")
     ]
     
-    with torch.no_grad():
+    with torch.inference_mode():
         output = llm_model.generate(
             **input_ids,
-            max_new_tokens=500,
+            max_new_tokens=1024,
             do_sample=False,
             eos_token_id=terminators,
             num_beams=1
@@ -143,28 +188,28 @@ def ask_llm(question, context, chat_history):
 
 def rephrase_question(question, history):
     history_text = "\n".join([f"Пользователь: {h['user']}\nАссистент: {h['assistant']}" for h in history])
-    prompt = f"""
-Ты помощник для переформулирования поисковых запросов. 
-Переформулируй последний вопрос пользователя с учетом контекста диалога, 
-но НЕ включай информацию из предыдущих ответов, если ты не смог найти ответ на вопрос, в новый поисковый запрос.
 
-История диалога (только для контекста):
+    system_prompt = """Ты - помощник для переформулирования поисковых запросов. 
+Переформулируй последний вопрос пользователя с учетом контекста диалога, 
+но НЕ включай информацию из предыдущих ответов, если ты не смог найти ответ на вопрос, в новый поисковый запрос."""
+
+    prompt = f"""История диалога (только для контекста):
 {history_text}
 
-Текущий вопрос: "{question}"
+Текущий вопрос: 
+{question}
 
 Переформулируй текущий вопрос как самодостаточный поисковый запрос, 
 сохраняя его оригинальный смысл. Не упоминай предыдущие нерелевантные ответы.
 
 Переформулированный вопрос:
 """
-    messages = [{"role":"user", "content":prompt}]
+    messages = [{"role":"system", "content":system_prompt},{"role":"user", "content":prompt}]
 
     input_ids = llm_tokenizer.apply_chat_template(
         messages,
-        add_generaton_prompt=True,
+        add_generation_prompt=True,
         return_tensors="pt",
-        tokenize=True,
         return_dict=True
     ).to(device)
     
@@ -173,10 +218,10 @@ def rephrase_question(question, history):
         llm_tokenizer.convert_tokens_to_ids("<|eot_id|>")
     ]
     
-    with torch.no_grad():
+    with torch.inference_mode():
         output = llm_model.generate(
             **input_ids,
-            max_new_tokens=200,
+            max_new_tokens=300,
             do_sample=False,
             eos_token_id=terminators,
             num_beams=1
@@ -190,97 +235,310 @@ def rephrase_question(question, history):
 # ------------------------
 chat_history = []
 
-def save_chat_history(user_id, doc_id, user_msg, rephrased_msg, assistant_msg, sources_ids):
-    cur.execute(
-        """
-        INSERT INTO chat_history (user_id, doc_id, user_message, rephrased_message, assistant_message, sources_ids)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """,
-        (user_id, doc_id, user_msg, rephrased_msg, assistant_msg, sources_ids)
-    )
-    conn.commit()
+def save_chat_history(user_id, doc_id, user_msg, rephrased_msg, assistant_msg, timestamp, sources_ids, chunks):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO chat_history (user_id, doc_id, user_message, rephrased_message, assistant_message, timestamp, sources_ids, chunks)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (user_id, doc_id, user_msg, rephrased_msg, assistant_msg, timestamp, sources_ids, chunks)
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+users = [
+    cl.User(identifier="1", display_name="Admin", metadata={"username": "admin", "password": "admin"}),
+    cl.User(identifier="2", display_name="Oleg", metadata={"username": "Oleg", "password": "boss"})
+]
+
+def get_attr(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+class CustomDataLayer(BaseDataLayer):
+    async def build_debug_url(self) -> str:
+        return ""
+
+    def __init__(self):
+        self.users: Dict[str, PersistedUser] = {}
+        self.threads: Dict[str, ThreadDict] = {}
+        self.elements: Dict[str, ElementDict] = {}
+        self.steps: Dict[str, StepDict] = {}
+        self.feedback: Dict[str, Feedback] = {}
+
+    async def get_user(self, identifier: str) -> Optional[PersistedUser]:
+        return self.users.get(identifier)
+
+    async def create_user(self, user: User) -> PersistedUser:
+        persisted_user = PersistedUser(**user.__dict__, id=user.identifier, createdAt=datetime.now().date().strftime("%Y-%m-%d"))
+        self.users[user.identifier] = persisted_user
+        return persisted_user
+
+    async def upsert_feedback(self, feedback: Feedback) -> str:
+        self.feedback[feedback.id] = feedback
+        return feedback.id
+
+    async def delete_feedback(self, feedback_id: str) -> bool:
+        if feedback_id in self.feedback:
+            del self.feedback[feedback_id]
+            return True
+        return False
+
+    async def create_element(self, element_dict: ElementDict) -> None:
+        element_id = getattr(element_dict, "id", None)
+        if element_id is None:
+            element_id = f"file_{len(self.elements)+1}"
+        self.elements[element_id] = element_dict
+
+    async def get_element(self, thread_id: str, element_id: str) -> Optional[ElementDict]:
+        return self.elements.get(element_id)
+
+    async def delete_element(self, element_id: str, thread_id: Optional[str] = None) -> None:
+        if element_id in self.elements:
+            del self.elements[element_id]
+
+    async def create_step(self, step_dict: StepDict) -> None:
+        self.steps[step_dict["id"]] = step_dict
+
+    async def update_step(self, step_dict: StepDict) -> None:
+        self.steps[step_dict["id"]] = step_dict
+
+    async def delete_step(self, step_id: str) -> None:
+        if step_id in self.steps:
+            del self.steps[step_id]
+
+    async def get_thread_author(self, thread_id: str) -> str:
+        if thread_id in self.threads:
+            author = self.threads[thread_id]["userId"]
+        else:
+            author = "Unknown"
+        return author
+
+    async def delete_thread(self, thread_id: str) -> None:
+        if thread_id in self.threads:
+            del self.threads[thread_id]
+
+    async def list_threads(self, pagination: Pagination, filters: ThreadFilter) -> PaginatedResponse[ThreadDict]:
+        if not filters.userId:
+            raise ValueError("userId is required")
+
+        threads = [t for t in list(self.threads.values()) if t["userId"] == filters.userId]
+        start = 0
+        if pagination.cursor:
+            for i, thread in enumerate(threads):
+                if thread["id"] == pagination.cursor:
+                    start = i + 1
+                    break
+        end = start + pagination.first
+        paginated_threads = threads[start:end] or []
+
+        has_next_page = len(threads) > end
+        start_cursor = paginated_threads[0]["id"] if paginated_threads else None
+        end_cursor = paginated_threads[-1]["id"] if paginated_threads else None
+
+        result = PaginatedResponse(
+            pageInfo=PageInfo(
+                hasNextPage=has_next_page,
+                startCursor=start_cursor,
+                endCursor=end_cursor,
+            ),
+            data=paginated_threads,
+        )
+        return result
+
+    async def get_thread(self, thread_id: str) -> Optional[ThreadDict]:
+        thread = self.threads.get(thread_id)
+        if not thread:
+            return None
+            
+        thread["steps"] = [st for st in self.steps.values() if get_attr(st, "threadId")==thread_id]
+        thread["elements"] = [el for el in self.elements.values() if get_attr(el, "threadId")==thread_id]
+        return thread
+
+    async def update_thread(self, thread_id: str, name: Optional[str] = None, user_id: Optional[str] = None, metadata: Optional[Dict] = None, tags: Optional[List[str]] = None):
+        if thread_id in self.threads:
+            if name:
+                self.threads[thread_id]["name"] = name
+            if user_id:
+                self.threads[thread_id]["userId"] = user_id
+            if metadata:
+                self.threads[thread_id]["metadata"] = metadata
+            if tags:
+                self.threads[thread_id]["tags"] = tags
+        else:
+            data = {
+                "id": thread_id,
+                "createdAt": (
+                    datetime.now().isoformat() + "Z" if metadata is None else None
+                ),
+                "name": (
+                    name
+                    if name is not None
+                    else (metadata.get("name") if metadata and "name" in metadata else None)
+                ),
+                "userId": user_id,
+                "userIdentifier": user_id,
+                "tags": tags,
+                "metadata": json.dumps(metadata) if metadata else None,
+            }
+            self.threads[thread_id] = data
+
+    async def close(self):
+        """Закрыть соединения и очистить ресурсы"""
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+        torch.cuda.empty_cache()
+
+layer = CustomDataLayer()
+
+@cl.data_layer
+def get_data_layer():
+    return layer
+
+@cl.on_chat_start
+async def start_chat():
+    app_user = cl.user_session.get("user")
+    cl.user_session.set("chat_history", [])
+
+@cl.password_auth_callback
+def on_login(username: str, password: str) -> Optional[cl.User]:
+    for user in users:
+        current_username, current_password = user.metadata["username"], user.metadata["password"]
+        if current_username == username and current_password == password:
+            return user
+    return None
 
 # ------------------------
 # Chainlit core
 # ------------------------
-@cl.on_chat_start
-async def on_chat_start():
-    try:
-        # Сохраняем историю в пользовательской сессии
-        cl.user_session.set("chat_history", [])
-        
-    except Exception as e:
-        msg = cl.Message(content=f"Ошибка инициализации: {str(e)}")
-        await msg.update()
-        raise e
-    
+async def run_with_dots(
+    message: cl.Message,
+    base_text: str,
+    task: asyncio.Task,
+    dots_interval: float=0.6,
+    max_dots: int=3):
+    dots = ""
+    while not task.done():
+        dots = "." * (len(dots)%max_dots+1)
+        message.content = f"{base_text}{dots}"
+        # if len(dots) == 4:
+        #     dots = ""
+        await message.update()
+        await asyncio.sleep(dots_interval)
+    return await task
+
+
 @cl.on_message
 async def on_message(message: cl.Message):
+    start_time = time.time()
+
+    msg = await cl.Message(content="⌛ Ваш запрос в очереди на исполнение. Пожалуйста, подождите...", author="Assistant").send()
     chat_history = cl.user_session.get("chat_history", [])
-    
-    msg = cl.Message(content="Обрабатываю ваш запрос...")
-    await msg.send()
+    loop = asyncio.get_event_loop()
 
     try:
         # Рефразирование вопроса с учетом истории
         old_q = message.content
-        if chat_history:
-            new_question = rephrase_question(message.content, chat_history)
-            rephrased_q = new_question
-        else:
-            new_question = message.content
-            rephrased_q = None
+        async with inference_semaphore:
+            if chat_history:
+                rephrase_task = loop.run_in_executor(None, rephrase_question, message.content, chat_history)
+                new_question = await run_with_dots(msg, "♻️ Формирую запрос", rephrase_task)
+                rephrased_q = new_question
+            else:
+                msg.content = "⌛ Ваш запрос в очереди на исполнение. Пожалуйста, подождите..."
+                await msg.update()
+                # msg.content = "♻️ Формирую запрос..."
+                # await msg.update()
+                new_question = message.content
+                rephrased_q = None
 
         # Поиск релевантного контекста
-        context_chunks = search_context(new_question)
+        async with inference_semaphore:
+            search_task = loop.run_in_executor(None, search_context, new_question)
+            context_chunks = await run_with_dots(msg, "🔍 Ищу релевантные документы", search_task)
         if not context_chunks:
-            msg.content = "Информация в документах не найдена."
+            msg.content = "❌ Информация в документах не найдена."
             await msg.update()
-            return
 
         # Достаём текст чанков
         context = "\n\n".join([c[1] for c in context_chunks])
-        doc_id = context_chunks[0][0]  # Сохраняем doc_id из первого совпадения
-        sources = [f"{c[0]} ({c[2]['путь']})" for c in context_chunks]
-        sources = list(dict.fromkeys(sources))
+        doc_id = context_chunks[0][0]
+        sources = [c[2]['путь'] for c in context_chunks]
         
         # Генерация ответа
-        answer = ask_llm(message.content, context, chat_history)
+        async with inference_semaphore:
+            llm_task = loop.run_in_executor(None, ask_llm, message.content, context, chat_history)
+            answer = await run_with_dots(msg, "✍️ Генерирую ответ", llm_task)
+        
+        data_layer = get_data_layer()
+        
+        paths = []
+        files = []
+        for fp in sources:
+            if fp not in paths:
+                try:
+                    display_name = os.path.basename(fp)
+                    file_element = File(
+                        name=display_name,
+                        url=f"/docs/{display_name}",
+                        display="inline"
+                    )
+                    files.append(file_element)
+
+                    await data_layer.create_element({
+                    "id": str(uuid4()),
+                    "threadId": cl.context.session.thread_id,
+                    "type": "file",
+                    "name": display_name,
+                    "forId": msg.id,
+                    "url": f"/docs/{display_name}",
+                    "createdAt": datetime.now().isoformat()
+                })
+                    paths.append(fp)
+
+                except Exception as e:
+                    print(f"❌ Не удалось прикрепить файл {fp}: {e}")
+
+        # Отправка ответа
+        end_time = time.time()
+        msg.content=f"{answer}\n\n⌛ Время исполнения запроса: {round(end_time-start_time, 1)} секунд.\n\n📁 Источники:"
+        msg.elements = files
+        await msg.update()
 
         # Обновление истории
         chat_history.append({'user': message.content, 'assistant': answer, 'doc_id': doc_id})
         if len(chat_history) > 10:  # Ограничиваем историю
             chat_history = chat_history[-10:]
         cl.user_session.set("chat_history", chat_history)
+        timestamp = datetime.now()
         
         user_id = "1"
 
-        save_chat_history(user_id, doc_id, old_q, rephrased_q, answer, sources)
-        
-        # Отправка ответа
-        msg.content = f"{answer}\n\nИсточники:\n\n"
-        await msg.update()
-        
-        
-        for src in sources:
-            file_path = src.split("(")[-1].rstrip(")")
-            file_path = file_path.strip(" )")
-            if os.path.exists(file_path):
-                await File(name=os.path.basename(file_path), path=file_path).send(for_id=msg.id)
+        context = "\n-----------------------------------------------------------\n".join([c[1] for c in context_chunks])
+        save_chat_history(user_id, doc_id, old_q, rephrased_q, answer, timestamp, sources, context)
 
     except Exception as e:
-        msg.content = f"Произошла ошибка: {str(e)}"
-        await msg.update()
+        msg = cl.Message(content="♻️ Обрабатываю запрос...", author="Assistant")
+        msg.content=f"☠️ Произошла ошибка: {str(e)}"
+        await msg.send()
+        
 @cl.on_chat_resume
-async def on_chat_resume(thread):
+async def on_chat_resume(thread: ThreadDict):
     pass
 
 @cl.on_chat_end
 def on_chat_end():
-    # Очистка ресурсов при завершении чата
     torch.cuda.empty_cache()
 
 # Запуск приложения
 if __name__ == "__main__":
-    # Запуск: chainlit run app.py -w
+    # Запуск: chainlit run app.py
     pass
