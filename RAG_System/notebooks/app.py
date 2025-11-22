@@ -7,28 +7,27 @@ import chainlit as cl
 from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 from chainlit.element import File
 from datetime import datetime
-from typing import Dict, Optional, List
-from chainlit import PersistedUser, User
-from chainlit.data import BaseDataLayer
-from chainlit.element import ElementDict
-from chainlit.step import StepDict
-from chainlit.types import Feedback, ThreadDict, Pagination, ThreadFilter, PaginatedResponse, PageInfo
+from typing import Optional
+from chainlit.types import ThreadDict
 from uuid import uuid4
 from starlette.staticfiles import StaticFiles
 import asyncio
 from chainlit.server import app
 from starlette.routing import Mount
 import time
+from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 
 # ------------------------
 # Config
 # ------------------------
-DB_CONN = "dbname=appdb user=appuser password=secret port=5432 host=10.101.10.106"
+DB_CONN = "dbname=appdb user=appuser password=secret port=5433 host=10.101.10.106"
+CHAINLIT_CONN = "postgresql+asyncpg://appuser:secret@10.101.10.106:5433/appdb"
 EMB_MODEL_PATH = "/wrk/models/models--intfloat--multilingual-e5-large-instruct/snapshots/274baa43b0e13e37fafa6428dbc7938e62e5c439"
 LLM_MODEL_PATH = "/wrk/models/models--mistralai--Mistral-7B-Instruct-v0.3/snapshots/0d4b76e1efeb5eb6f6b5e757c79870472e04bd3a"
 DOCS = "/wrk/data"
 TOP_K = 9
 inference_semaphore = asyncio.Semaphore(1)
+
 # ------------------------
 # Models
 # ------------------------
@@ -46,13 +45,13 @@ llm_model = AutoModelForCausalLM.from_pretrained(
     device_map=device,
     trust_remote_code=True,
     quantization_config=quantization_config,
+    #dtype = torch.float16
 ).eval()
 llm_model = torch.compile(llm_model)
 
 # ------------------------
 # DB
 # ------------------------
-
 def get_db_connection():
     return psycopg2.connect(DB_CONN)
 
@@ -80,7 +79,6 @@ def embed(text: str):
 # ------------------------
 # DB search
 # ------------------------
-
 def search_context(query, top_k=TOP_K):
     conn = get_db_connection()
     cur = conn.cursor()
@@ -233,8 +231,6 @@ def rephrase_question(question, history):
 # ------------------------
 # Chat history test
 # ------------------------
-chat_history = []
-
 def save_chat_history(user_id, doc_id, user_msg, rephrased_msg, assistant_msg, timestamp, sources_ids, chunks):
     conn = get_db_connection()
     cur = conn.cursor()
@@ -251,169 +247,37 @@ def save_chat_history(user_id, doc_id, user_msg, rephrased_msg, assistant_msg, t
         cur.close()
         conn.close()
 
-users = [
-    cl.User(identifier="1", display_name="Admin", metadata={"username": "admin", "password": "admin"}),
-    cl.User(identifier="2", display_name="Oleg", metadata={"username": "Oleg", "password": "boss"})
-]
+
+@cl.data_layer
+def get_data_layer():
+    return SQLAlchemyDataLayer(
+        conninfo=CHAINLIT_CONN
+    )
 
 def get_attr(obj, key, default=None):
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
 
-class CustomDataLayer(BaseDataLayer):
-    async def build_debug_url(self) -> str:
-        return ""
-
-    def __init__(self):
-        self.users: Dict[str, PersistedUser] = {}
-        self.threads: Dict[str, ThreadDict] = {}
-        self.elements: Dict[str, ElementDict] = {}
-        self.steps: Dict[str, StepDict] = {}
-        self.feedback: Dict[str, Feedback] = {}
-
-    async def get_user(self, identifier: str) -> Optional[PersistedUser]:
-        return self.users.get(identifier)
-
-    async def create_user(self, user: User) -> PersistedUser:
-        persisted_user = PersistedUser(**user.__dict__, id=user.identifier, createdAt=datetime.now().date().strftime("%Y-%m-%d"))
-        self.users[user.identifier] = persisted_user
-        return persisted_user
-
-    async def upsert_feedback(self, feedback: Feedback) -> str:
-        self.feedback[feedback.id] = feedback
-        return feedback.id
-
-    async def delete_feedback(self, feedback_id: str) -> bool:
-        if feedback_id in self.feedback:
-            del self.feedback[feedback_id]
-            return True
-        return False
-
-    async def create_element(self, element_dict: ElementDict) -> None:
-        element_id = getattr(element_dict, "id", None)
-        if element_id is None:
-            element_id = f"file_{len(self.elements)+1}"
-        self.elements[element_id] = element_dict
-
-    async def get_element(self, thread_id: str, element_id: str) -> Optional[ElementDict]:
-        return self.elements.get(element_id)
-
-    async def delete_element(self, element_id: str, thread_id: Optional[str] = None) -> None:
-        if element_id in self.elements:
-            del self.elements[element_id]
-
-    async def create_step(self, step_dict: StepDict) -> None:
-        self.steps[step_dict["id"]] = step_dict
-
-    async def update_step(self, step_dict: StepDict) -> None:
-        self.steps[step_dict["id"]] = step_dict
-
-    async def delete_step(self, step_id: str) -> None:
-        if step_id in self.steps:
-            del self.steps[step_id]
-
-    async def get_thread_author(self, thread_id: str) -> str:
-        if thread_id in self.threads:
-            author = self.threads[thread_id]["userId"]
-        else:
-            author = "Unknown"
-        return author
-
-    async def delete_thread(self, thread_id: str) -> None:
-        if thread_id in self.threads:
-            del self.threads[thread_id]
-
-    async def list_threads(self, pagination: Pagination, filters: ThreadFilter) -> PaginatedResponse[ThreadDict]:
-        if not filters.userId:
-            raise ValueError("userId is required")
-
-        threads = [t for t in list(self.threads.values()) if t["userId"] == filters.userId]
-        start = 0
-        if pagination.cursor:
-            for i, thread in enumerate(threads):
-                if thread["id"] == pagination.cursor:
-                    start = i + 1
-                    break
-        end = start + pagination.first
-        paginated_threads = threads[start:end] or []
-
-        has_next_page = len(threads) > end
-        start_cursor = paginated_threads[0]["id"] if paginated_threads else None
-        end_cursor = paginated_threads[-1]["id"] if paginated_threads else None
-
-        result = PaginatedResponse(
-            pageInfo=PageInfo(
-                hasNextPage=has_next_page,
-                startCursor=start_cursor,
-                endCursor=end_cursor,
-            ),
-            data=paginated_threads,
-        )
-        return result
-
-    async def get_thread(self, thread_id: str) -> Optional[ThreadDict]:
-        thread = self.threads.get(thread_id)
-        if not thread:
-            return None
-            
-        thread["steps"] = [st for st in self.steps.values() if get_attr(st, "threadId")==thread_id]
-        thread["elements"] = [el for el in self.elements.values() if get_attr(el, "threadId")==thread_id]
-        return thread
-
-    async def update_thread(self, thread_id: str, name: Optional[str] = None, user_id: Optional[str] = None, metadata: Optional[Dict] = None, tags: Optional[List[str]] = None):
-        if thread_id in self.threads:
-            if name:
-                self.threads[thread_id]["name"] = name
-            if user_id:
-                self.threads[thread_id]["userId"] = user_id
-            if metadata:
-                self.threads[thread_id]["metadata"] = metadata
-            if tags:
-                self.threads[thread_id]["tags"] = tags
-        else:
-            data = {
-                "id": thread_id,
-                "createdAt": (
-                    datetime.now().isoformat() + "Z" if metadata is None else None
-                ),
-                "name": (
-                    name
-                    if name is not None
-                    else (metadata.get("name") if metadata and "name" in metadata else None)
-                ),
-                "userId": user_id,
-                "userIdentifier": user_id,
-                "tags": tags,
-                "metadata": json.dumps(metadata) if metadata else None,
-            }
-            self.threads[thread_id] = data
-
-    async def close(self):
-        """Закрыть соединения и очистить ресурсы"""
-        if cur:
-            cur.close()
-        if conn:
-            conn.close()
-        torch.cuda.empty_cache()
-
-layer = CustomDataLayer()
-
-@cl.data_layer
-def get_data_layer():
-    return layer
-
 @cl.on_chat_start
 async def start_chat():
-    app_user = cl.user_session.get("user")
     cl.user_session.set("chat_history", [])
 
 @cl.password_auth_callback
-def on_login(username: str, password: str) -> Optional[cl.User]:
-    for user in users:
-        current_username, current_password = user.metadata["username"], user.metadata["password"]
-        if current_username == username and current_password == password:
-            return user
+async def on_login(username: str, password: str) -> Optional[cl.User]:
+    try:
+        conn = psycopg2.connect(DB_CONN)
+        cur = conn.cursor()
+        cur.execute("SELECT id, identifier, metadata FROM users WHERE metadata->>'username' = %s;", (username,))
+        row = cur.fetchone()
+        if row:
+            user_id, identifier, metadata = row
+            if metadata.get("password") == password:
+                return cl.User(identifier=identifier, display_name=metadata.get("display_name"), metadata={"username":metadata.get("username"), "password":metadata.get("password"), "access":metadata.get("access"), "display_name":metadata.get("display_name")})
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
     return None
 
 # ------------------------
@@ -429,8 +293,6 @@ async def run_with_dots(
     while not task.done():
         dots = "." * (len(dots)%max_dots+1)
         message.content = f"{base_text}{dots}"
-        # if len(dots) == 4:
-        #     dots = ""
         await message.update()
         await asyncio.sleep(dots_interval)
     return await task
@@ -455,8 +317,6 @@ async def on_message(message: cl.Message):
             else:
                 msg.content = "⌛ Ваш запрос в очереди на исполнение. Пожалуйста, подождите..."
                 await msg.update()
-                # msg.content = "♻️ Формирую запрос..."
-                # await msg.update()
                 new_question = message.content
                 rephrased_q = None
 
@@ -486,31 +346,24 @@ async def on_message(message: cl.Message):
             if fp not in paths:
                 try:
                     display_name = os.path.basename(fp)
-                    file_element = File(
-                        name=display_name,
-                        url=f"/docs/{display_name}",
-                        display="inline"
-                    )
-                    files.append(file_element)
-
-                    await data_layer.create_element({
-                    "id": str(uuid4()),
-                    "threadId": cl.context.session.thread_id,
-                    "type": "file",
-                    "name": display_name,
-                    "forId": msg.id,
-                    "url": f"/docs/{display_name}",
-                    "createdAt": datetime.now().isoformat()
-                })
-                    paths.append(fp)
+                    ending = display_name[-4::]
+                    if "pdf" in ending or "pptx" in ending:
+                        files.append(f"🔴📃 [{display_name}](/docs/{display_name})")
+                        paths.append(fp)
+                    elif "doc" in ending or "txt" in ending:
+                        files.append(f"🔵📃 [{display_name}](/docs/{display_name})")
+                        paths.append(fp)
+                    else:
+                        files.append(f"🟢📃 [{display_name}](/docs/{display_name})")
+                        paths.append(fp)
 
                 except Exception as e:
                     print(f"❌ Не удалось прикрепить файл {fp}: {e}")
 
         # Отправка ответа
+        sources_text = "\n".join(f"- {link}" for link in files)
         end_time = time.time()
-        msg.content=f"{answer}\n\n⌛ Время исполнения запроса: {round(end_time-start_time, 1)} секунд.\n\n📁 Источники:"
-        msg.elements = files
+        msg.content=f"{answer}\n\n⌛ Время исполнения запроса: {round(end_time-start_time, 1)} секунд.\n\n📁 Источники:\n{sources_text}"
         await msg.update()
 
         # Обновление истории
@@ -540,5 +393,4 @@ def on_chat_end():
 
 # Запуск приложения
 if __name__ == "__main__":
-    # Запуск: chainlit run app.py
     pass
