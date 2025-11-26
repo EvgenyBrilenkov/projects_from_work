@@ -16,15 +16,18 @@ from chainlit.server import app
 from starlette.routing import Mount
 import time
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+from urllib.parse import quote
+from chainlit.context import context
+
 
 # ------------------------
 # Config
 # ------------------------
-DB_CONN = "dbname=appdb user=appuser password=secret port=5433 host=10.101.10.106"
-CHAINLIT_CONN = "postgresql+asyncpg://appuser:secret@10.101.10.106:5433/appdb"
+DB_CONN = "dbname=appdb user=appuser password=secret port=5432 host=10.101.10.106"
+CHAINLIT_CONN = "postgresql+asyncpg://appuser:secret@10.101.10.106:5432/appdb"
 EMB_MODEL_PATH = "/wrk/models/models--intfloat--multilingual-e5-large-instruct/snapshots/274baa43b0e13e37fafa6428dbc7938e62e5c439"
 LLM_MODEL_PATH = "/wrk/models/models--mistralai--Mistral-7B-Instruct-v0.3/snapshots/0d4b76e1efeb5eb6f6b5e757c79870472e04bd3a"
-DOCS = "/wrk/data"
+DOCS = "/wrk/data/База данных pdf" #"/wrk/data/ИТК_ВСЕ_ОТЧЕТЫ"
 TOP_K = 9
 inference_semaphore = asyncio.Semaphore(1)
 
@@ -88,7 +91,7 @@ def search_context(query, top_k=TOP_K):
         cur.execute(
             """
             SELECT doc_id, content, metadata, 1 - (embedding <-> %s) AS vec_score
-            FROM documents
+            FROM CTO
             ORDER BY embedding <-> %s
             LIMIT %s
             """,
@@ -100,7 +103,7 @@ def search_context(query, top_k=TOP_K):
         cur.execute(
             """
             SELECT doc_id, content, metadata, ts_rank_cd(tsv, plainto_tsquery('russian', %s)) AS bm25_score
-            FROM documents
+            FROM CTO
             WHERE tsv @@ plainto_tsquery('russian', %s)
             ORDER BY bm25_score DESC
             LIMIT %s
@@ -229,7 +232,7 @@ def rephrase_question(question, history):
     return llm_tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
 # ------------------------
-# Chat history test
+# Chat history
 # ------------------------
 def save_chat_history(user_id, doc_id, user_msg, rephrased_msg, assistant_msg, timestamp, sources_ids, chunks):
     conn = get_db_connection()
@@ -247,6 +250,32 @@ def save_chat_history(user_id, doc_id, user_msg, rephrased_msg, assistant_msg, t
         cur.close()
         conn.close()
 
+def load_chat_history(thread_id: str, max_pairs: int = 20):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT type, output FROM steps WHERE "threadId" = %s AND type IN ('user_message', 'assistant_message') AND output is NOT NULL ORDER BY "createdAt" ASC
+            """, (thread_id,))
+
+        rows = cur.fetchall()
+        chat_history = []
+        user_msg = None
+
+        ignore_prefixes = ("⌛", "♻️", "🔍", "✍️", "❌")
+
+        for msg_type, content in rows:
+            if msg_type == 'user_message':
+                user_msg = content
+            elif msg_type == 'assistant_message' and user_msg and not any(content.startswith(p) for p in ignore_prefixes):
+                chat_history.append({"user": user_msg, "assistant": content.split("⌛")[0][:-2:]})
+                user_msg = None
+        
+        return chat_history[-max_pairs:]
+
+    finally:
+        cur.close()
+        conn.close()
 
 @cl.data_layer
 def get_data_layer():
@@ -261,7 +290,7 @@ def get_attr(obj, key, default=None):
 
 @cl.on_chat_start
 async def start_chat():
-    cl.user_session.set("chat_history", [])
+    torch.cuda.empty_cache()
 
 @cl.password_auth_callback
 async def on_login(username: str, password: str) -> Optional[cl.User]:
@@ -297,13 +326,14 @@ async def run_with_dots(
         await asyncio.sleep(dots_interval)
     return await task
 
-
 @cl.on_message
 async def on_message(message: cl.Message):
     start_time = time.time()
 
     msg = await cl.Message(content="⌛ Ваш запрос в очереди на исполнение. Пожалуйста, подождите...", author="Assistant").send()
-    chat_history = cl.user_session.get("chat_history", [])
+    thread_id = cl.context.session.thread_id
+    chat_history = load_chat_history(thread_id, max_pairs = 20)
+    print(chat_history)
     loop = asyncio.get_event_loop()
 
     try:
@@ -347,14 +377,15 @@ async def on_message(message: cl.Message):
                 try:
                     display_name = os.path.basename(fp)
                     ending = display_name[-4::]
+                    link_ = quote(display_name)
                     if "pdf" in ending or "pptx" in ending:
-                        files.append(f"🔴📃 [{display_name}](/docs/{display_name})")
+                        files.append(f"🔴📃 [{display_name}](/docs/{link_})")
                         paths.append(fp)
-                    elif "doc" in ending or "txt" in ending:
-                        files.append(f"🔵📃 [{display_name}](/docs/{display_name})")
+                    elif "doc" in ending or "docx" in ending or "txt" in ending:
+                        files.append(f"🔵📃 [{display_name}](/docs/{link_})")
                         paths.append(fp)
                     else:
-                        files.append(f"🟢📃 [{display_name}](/docs/{display_name})")
+                        files.append(f"🟢📃 [{display_name}](/docs/{link_})")
                         paths.append(fp)
 
                 except Exception as e:
@@ -366,14 +397,10 @@ async def on_message(message: cl.Message):
         msg.content=f"{answer}\n\n⌛ Время исполнения запроса: {round(end_time-start_time, 1)} секунд.\n\n📁 Источники:\n{sources_text}"
         await msg.update()
 
-        # Обновление истории
-        chat_history.append({'user': message.content, 'assistant': answer, 'doc_id': doc_id})
-        if len(chat_history) > 10:  # Ограничиваем историю
-            chat_history = chat_history[-10:]
-        cl.user_session.set("chat_history", chat_history)
         timestamp = datetime.now()
         
-        user_id = "1"
+        current_user = cl.user_session.get("user")
+        user_id = current_user.identifier
 
         context = "\n-----------------------------------------------------------\n".join([c[1] for c in context_chunks])
         save_chat_history(user_id, doc_id, old_q, rephrased_q, answer, timestamp, sources, context)
