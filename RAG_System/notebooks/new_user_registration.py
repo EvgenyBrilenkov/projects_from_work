@@ -7,10 +7,10 @@ DB_CONN = "dbname=appdb user=appuser password=secret port=5432 host=10.101.10.10
 CHAINLIT_CONN = "postgresql+asyncpg://appuser:secret@10.101.10.106:5432/appdb"
 
 # -----------NEW-USER-DATA------------
-login = "test"
+login = "admin"
 password = "1234"
-display_name = "Test"
-access = "2"
+display_name = "Admin"
+access = "1"
 # ------------------------------------
 
 conn = psycopg2.connect(DB_CONN)
@@ -23,7 +23,10 @@ cur.execute(
             """
             )
 
-identifier = str(int(cur.fetchall()[0][0]) + 1)
+if cur.fetchall()[0][0]:
+    identifier = str(int(cur.fetchall()[0][0]) + 1)
+else:
+    identifier = '0'
 
 cur.close()
 conn.close()
