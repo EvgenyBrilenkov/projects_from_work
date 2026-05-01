@@ -13,26 +13,16 @@ Anomaly Detection  - это задача детекции аномалий на 
 
 ## Архитектура репозитория  
 
-<<<<<<< HEAD
-Anomaly_detection 
-=======
 Anomaly_detection  
->>>>>>> 015334fac7c04796a07ba1deeebfb9756f3ded27
 |  
 |___training_code (директория с обучением моделей и подбором параметров)  
 |  
 |___inference_code (директория с кодом для инференса/теста моделей)  
 |  
 |___images (изображения для README)  
-<<<<<<< HEAD
 | 
 |___env.yml (файл с окружением)  
 | 
-=======
-|  
-|___env.yml (файл с окружением)  
-|  
->>>>>>> 015334fac7c04796a07ba1deeebfb9756f3ded27
 |___models_comparing.xlsx (таблица с метриками моделей)  
 
 ## Устройство кода
@@ -110,8 +100,4 @@ PatchCore:
 
 ![sample_1](/Anomaly_detection/images/sample_1.jpg)   
 
-<<<<<<< HEAD
 ![sample_2](/Anomaly_detection/images/sample_2.jpg)
-=======
-![sample_2](/Anomaly_detection/images/sample_2.jpg)
->>>>>>> 015334fac7c04796a07ba1deeebfb9756f3ded27
