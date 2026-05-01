@@ -1,0 +1,6 @@
+train: /wrk/main/yolo/yolo_data/images/train
+val: /wrk/main/yolo/yolo_data/images/val
+
+nc: 1
+
+names: ['defect']
