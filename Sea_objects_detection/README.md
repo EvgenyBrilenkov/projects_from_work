@@ -1,4 +1,4 @@
-### Sea Objects Detection
+# Sea Objects Detection
 
 Sea Objects Detection - проект, направленный на детекцию объектов на море на изображениях высокого разрешения (преимущественно 4k) с помощью обучения модели YOLO26m.
 
