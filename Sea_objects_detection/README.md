@@ -60,7 +60,13 @@ Sea_objects_detection  
 
 Примеры классов в наборе данных:
 
-**SOON**
+![ship_plane](/Sea_objects_detection/images/ship_plane.jpg)
+
+![person](/Sea_objects_detection/images/person.jpg)
+
+![buoy](/Sea_objects_detection/images/buoy.jpg)
+
+![helicopter](/Sea_objects_detection/images/helicopter.jpg)
 
 Все скрипты по предобработке данных находятся в файле data_prep_scripts.ipynb
 
