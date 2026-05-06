@@ -18,7 +18,7 @@ cur = conn.cursor()
 
 cur.execute(
             """
-            SELECT MAX(identifier)
+            SELECT MAX(identifier::INTEGER)
             FROM users
             """
             )

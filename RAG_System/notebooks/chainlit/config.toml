@@ -65,13 +65,13 @@ edit_message = true
 
 [UI]
 # Name of the assistant.
-name = "Чувачок"
+name = "Чат-бот"
 
-# default_theme = "dark"
+default_theme = "light"
 
 # layout = "wide"
 
-# default_sidebar_state = "open"
+default_sidebar_state = "open"
 
 # Description of the assistant. This is used for HTML tags.
 description = "Виртуальный ассистент для ответа на вопросы по документам"
