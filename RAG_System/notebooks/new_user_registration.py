@@ -35,7 +35,6 @@ conn.close()
 
 metadata={"username": login, "password": password, "display_name": display_name, "access": access}
 
-
 @cl.password_auth_callback
 async def on_login(username: str, password_1: str) -> Optional[cl.User]:    
     print('login')                  
